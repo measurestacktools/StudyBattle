@@ -1,9 +1,9 @@
 // StudyBattle frontend — vanilla JS. NEVER stores API keys (no localStorage/sessionStorage for keys).
 let difficulty = "Medium";
-let currentOptions = [];
 let timerId = null;
 let qStart = 0;
 let timeLimit = 15000;
+let lastTimeout = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,7 +17,8 @@ function setHud(d) {
   if (d.xp !== undefined) $("hudXp").textContent = d.xp;
   if (d.level !== undefined) $("hudLevel").textContent = d.level;
   if (d.streak !== undefined) $("hudStreak").textContent = d.streak;
-  $("hudCombo").textContent = d.combo && d.combo > 1 ? `×${d.combo}` : "";
+  const c = Number(d.combo);
+  $("hudCombo").textContent = c && c > 1 ? `×${c}` : "";
 }
 async function api(path, method = "GET", body) {
   const r = await fetch(path, {
@@ -32,6 +33,9 @@ async function api(path, method = "GET", body) {
 
 // Setup
 $("inpTopic").addEventListener("input", (e) => { $("topicCount").textContent = `${e.target.value.length}/200`; });
+$("inpTopic").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("btnStart").click(); }
+});
 document.querySelectorAll("#diffRow .diff").forEach((b) => {
   b.addEventListener("click", () => {
     document.querySelectorAll("#diffRow .diff").forEach((x) => x.classList.remove("sel"));
@@ -42,22 +46,27 @@ document.querySelectorAll("#diffRow .diff").forEach((b) => {
 $("btnStart").addEventListener("click", async () => {
   $("setupErr").textContent = "";
   const topic = $("inpTopic").value.trim();
-  if (!topic) { $("setupErr").textContent = "Enter a subject/topic to battle!"; return; }
+  if (!topic) { $("setupErr").textContent = "Enter a subject/topic to battle!"; $("inpTopic").focus(); return; }
   if (topic.length > 200) { $("setupErr").textContent = "Topic must be ≤ 200 characters."; return; }
-  $("btnStart").textContent = "SUMMONING AI...";
+  const btn = $("btnStart");
+  btn.disabled = true;
+  btn.textContent = "WRITING ON BOARD…";
   try {
     const d = await api("/api/start", "POST", { topic, difficulty });
     $("setupFlavor").textContent = d.flavor || "";
     setHud({ score: 0, xp: 0, level: 1, streak: 0, combo: 1 });
     await loadQuestion();
   } catch (e) { $("setupErr").textContent = e.message; }
-  $("btnStart").textContent = "▶ START BATTLE";
+  btn.disabled = false;
+  btn.textContent = "START QUIZ ➤";
 });
 
 function startTimer(ms) {
   clearInterval(timerId);
   timeLimit = ms; qStart = Date.now();
+  lastTimeout = false;
   const bar = $("timerBar");
+  bar.style.width = "100%";
   timerId = setInterval(() => {
     const el = Date.now() - qStart;
     const left = Math.max(0, 1 - el / ms);
@@ -68,19 +77,19 @@ function startTimer(ms) {
 async function loadQuestion() {
   show("screen-battle");
   $("battleErr").textContent = "";
-  $("qText").textContent = "Summoning question...";
+  $("qText").textContent = "Writing question on the board…";
   $("qOpts").innerHTML = "";
   try {
     const q = await api("/api/question", "POST");
-    currentOptions = q.options;
     $("roundLabel").textContent = `ROUND ${q.round}`;
     $("diffLabel").textContent = q.difficulty.toUpperCase();
     const boss = $("bossBadge");
     if (q.is_boss) boss.classList.remove("hidden"); else boss.classList.add("hidden");
-    $("qText").textContent = (q.is_boss ? "👹 " : "") + q.question;
+    $("qText").textContent = q.question;
     const wrap = $("qOpts");
     q.options.forEach((opt) => {
       const b = document.createElement("button");
+      b.type = "button";
       b.className = "opt"; b.textContent = opt;
       b.addEventListener("click", () => answer(opt, b));
       wrap.appendChild(b);
@@ -90,12 +99,16 @@ async function loadQuestion() {
 }
 async function timeoutAnswer() {
   // auto-submit with empty-ish wrong choice on timeout
+  lastTimeout = true;
   await answer("__TIMEOUT__", null, true);
+}
+function setOptsEnabled(on) {
+  document.querySelectorAll("#qOpts .opt").forEach((b) => { b.disabled = !on; });
 }
 async function answer(choice, btn, isTimeout = false) {
   clearInterval(timerId);
   const elapsed = Date.now() - qStart;
-  document.querySelectorAll("#qOpts .opt").forEach((b) => (b.disabled = true));
+  setOptsEnabled(false);
   try {
     const payloadChoice = isTimeout ? "__TIMEOUT__" : choice;
     const r = await api("/api/answer", "POST", { choice: payloadChoice, time_ms: elapsed });
@@ -105,25 +118,32 @@ async function answer(choice, btn, isTimeout = false) {
       if (b.textContent.trim().toLowerCase() === String(r.answer).trim().toLowerCase()) b.classList.add("correct");
     });
     setHud(r);
-    setTimeout(() => showFeedback(r), 700);
-  } catch (e) { $("battleErr").textContent = e.message; }
+    setTimeout(() => showFeedback(r, isTimeout), 700);
+  } catch (e) {
+    $("battleErr").textContent = e.message;
+    setOptsEnabled(true); // let the student retry instead of a dead board
+  }
 }
-function showFeedback(r) {
+function showFeedback(r, wasTimeout) {
   show("screen-feedback");
-  $("fbTitle").textContent = r.correct ? (r.is_boss ? "👹 BOSS SLAIN!" : "⚡ CORRECT!") : "💥 HIT TAKEN!";
-  $("fbTitle").style.color = r.correct ? "#39ff88" : "#ff4d5e";
+  const timedOut = wasTimeout || lastTimeout;
+  if (timedOut && !r.correct) {
+    $("fbTitle").textContent = "TIME'S UP!";
+  } else {
+    $("fbTitle").textContent = r.correct ? (r.is_boss ? "BONUS NAILED!" : "CORRECT!") : "NOT QUITE!";
+  }
+  $("fbTitle").style.color = r.correct ? "#7fb069" : "#d1604f";
   $("fbXp").textContent = r.correct ? `+${r.xp_earned} XP` : "+0 XP";
   $("fbExpl").textContent = `Answer: ${r.answer} — ${r.explanation}`;
   let extra = `Streak ${r.streak} · Combo ×${r.combo} · Level ${r.level}`;
-  if (r.adaptation === "difficulty_eased") extra += " · AI eased off (2 misses)";
-  if (r.adaptation === "difficulty_raised") extra += " · AI powers up (streak ≥ 5)!";
+  if (r.adaptation === "difficulty_eased") extra += " · Next round eases off (2 misses)";
+  if (r.adaptation === "difficulty_raised") extra += " · Stepping up (streak ≥ 5)!";
   if (r.hint) extra += ` · ${r.hint}`;
   $("fbHint").textContent = extra;
 }
 $("btnNext").addEventListener("click", loadQuestion);
 
-// Finish flow: auto-finish after N rounds? Provide finish via keyboard? Add finish on feedback after round>=3 via long-press? Simpler: NEXT goes on; add FINISH button on battle via double-click round label.
-$("roundLabel").addEventListener("dblclick", finishGame);
+// Finish flow via the FINISH button on the battle HUD.
 $("btnEndBattle").addEventListener("click", finishGame);
 async function finishGame() {
   try {
@@ -133,9 +153,19 @@ async function finishGame() {
     $("fLevel").textContent = f.level;
     $("fAcc").textContent = `${f.accuracy}% (${f.correct}/${f.total})`;
     $("fStreak").textContent = f.best_streak;
-    $("fWeak").innerHTML = f.weak_topics.length
-      ? f.weak_topics.map((w) => `<span>${w}</span>`).join("")
-      : "<span>None — flawless!</span>";
+    const weak = $("fWeak");
+    weak.innerHTML = "";
+    if (f.weak_topics.length) {
+      f.weak_topics.forEach((w) => {
+        const s = document.createElement("span");
+        s.textContent = w; // textContent: never interpret model text as HTML
+        weak.appendChild(s);
+      });
+    } else {
+      const s = document.createElement("span");
+      s.textContent = "None — flawless!";
+      weak.appendChild(s);
+    }
     show("screen-final");
   } catch (e) { $("battleErr").textContent = e.message; }
 }
@@ -162,14 +192,21 @@ $("btnKey").addEventListener("click", async () => {
   catch { $("keyStatus").textContent = "status: ?"; }
 });
 $("btnCloseKey").addEventListener("click", () => $("keyModal").classList.add("hidden"));
+$("keyModal").addEventListener("click", (e) => { if (e.target === $("keyModal")) $("keyModal").classList.add("hidden"); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("keyModal").classList.contains("hidden")) $("keyModal").classList.add("hidden");
+});
 $("btnSaveKey").addEventListener("click", async () => {
   $("keyMsg").textContent = "Verifying...";
   const k = $("inpKey").value;
+  if (!k.trim()) { $("keyMsg").textContent = "Paste a key first."; return; }
+  $("btnSaveKey").disabled = true;
   try {
     await api("/api/key", "POST", { key: k });
     $("keyMsg").textContent = "Key saved in server memory ✓";
     $("inpKey").value = "";
   } catch (e) { $("keyMsg").textContent = e.message; }
+  $("btnSaveKey").disabled = false;
 });
 $("btnClearKey").addEventListener("click", async () => {
   try { await api("/api/key", "DELETE"); $("keyMsg").textContent = "Key cleared."; }

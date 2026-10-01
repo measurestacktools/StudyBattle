@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>STUDY BATTLE — AI Arena</title>
-<link rel="stylesheet" href="/static/style.css" />
+<title>STUDY BATTLE — Classroom Duel</title>
+<link rel="stylesheet" href="/static/style.css?v=2" />
 </head>
 <body>
-<div class="bg-grid"></div>
+<div class="chalk-frame">
 <header class="topbar">
-  <div class="logo">⚡ STUDY<span>BATTLE</span></div>
-  <div class="top-stats">
+  <div class="logo">STUDY<span>BATTLE</span><em>CLASSROOM DUEL · PERIOD 1</em></div>
+  <div class="top-stats" role="status" aria-label="Scoreboard">
     <div class="stat">SCORE <b id="hudScore">0</b></div>
     <div class="stat">XP <b id="hudXp">0</b></div>
     <div class="stat">LV <b id="hudLevel">1</b></div>
     <div class="stat">STREAK <b id="hudStreak">0</b> <span id="hudCombo" class="combo"></span></div>
-    <button id="btnKey" class="btn ghost small">⚙ KEY</button>
+    <button id="btnKey" class="btn ghost small">KEY</button>
   </div>
 </header>
 
@@ -23,21 +23,21 @@
   <!-- SETUP SCREEN -->
   <section id="screen-setup" class="screen active">
     <div class="arcade-card">
-      <div class="insert-coin">● INSERT KNOWLEDGE ●</div>
+      <div class="insert-coin">— TAKE YOUR SEATS —</div>
       <h1 class="title">STUDY <span>BATTLE</span></h1>
-      <p class="subtitle">Challenge the AI · Survive the rounds · Slay the BOSS every 5th round</p>
-      <label class="lbl">SUBJECT / TOPIC <span id="topicCount">0/200</span></label>
+      <p class="subtitle">Pop-quiz duel · Answer rounds · Bonus question every 5th round</p>
+      <label class="lbl" for="inpTopic">SUBJECT / TOPIC <span id="topicCount">0/200</span></label>
       <input id="inpTopic" maxlength="200" placeholder="e.g. Photosynthesis, World War 2, Python loops..." />
       <label class="lbl">DIFFICULTY</label>
       <div class="diff-row" id="diffRow">
-        <button data-d="Easy" class="diff">EASY</button>
-        <button data-d="Medium" class="diff sel">MEDIUM</button>
-        <button data-d="Hard" class="diff">HARD</button>
+        <button type="button" data-d="Easy" class="diff">EASY</button>
+        <button type="button" data-d="Medium" class="diff sel">MEDIUM</button>
+        <button type="button" data-d="Hard" class="diff">HARD</button>
       </div>
-      <button id="btnStart" class="btn fight">▶ START BATTLE</button>
+      <button id="btnStart" class="btn fight">START QUIZ ➤</button>
       <p id="setupFlavor" class="flavor"></p>
       <p id="setupErr" class="err"></p>
-      <div class="rules">⏱ 15s MCQ · 10s True/False · 20s BOSS · Combo ×1.5 every 3 streak · BOSS = 3× XP</div>
+      <div class="rules">15s multiple-choice · 10s true/false · 20s bonus round · Streak bonus every 3 · Bonus round = 3× XP</div>
     </div>
   </section>
 
@@ -46,10 +46,10 @@
     <div class="battle-hud">
       <div id="roundLabel">ROUND 1</div>
       <div id="diffLabel">MEDIUM</div>
-      <div id="bossBadge" class="boss hidden">👹 BOSS ×3 XP</div>
-      <button id="btnEndBattle" class="btn ghost small">■ FINISH</button>
+      <div id="bossBadge" class="boss hidden">BONUS ROUND · ×3 XP</div>
+      <button id="btnEndBattle" class="btn ghost small">FINISH</button>
     </div>
-    <div class="timer-wrap"><div id="timerBar"></div></div>
+    <div class="timer-wrap" aria-hidden="true"><div id="timerBar"></div></div>
     <div class="arcade-card wide">
       <h2 id="qText">Loading...</h2>
       <div id="qOpts" class="opts"></div>
@@ -71,7 +71,7 @@
   <!-- FINAL SCREEN -->
   <section id="screen-final" class="screen">
     <div class="arcade-card">
-      <div class="insert-coin">★ GAME OVER ★</div>
+      <div class="insert-coin">— REPORT CARD —</div>
       <h1 class="title small">BATTLE <span>RESULTS</span></h1>
       <div class="results">
         <div>SCORE <b id="fScore">0</b></div>
@@ -80,7 +80,7 @@
         <div>ACCURACY <b id="fAcc">0%</b></div>
         <div>BEST STREAK <b id="fStreak">0</b></div>
       </div>
-      <div class="lbl">WEAK TOPICS</div>
+      <div class="lbl">REVIEW THESE TOPICS</div>
       <div id="fWeak" class="weak"></div>
       <div class="row">
         <button id="btnReplay" class="btn fight">↻ REPLAY</button>
@@ -91,6 +91,7 @@
     </div>
   </section>
 </main>
+</div>
 
 <!-- KEY MODAL -->
 <div id="keyModal" class="modal hidden">
@@ -107,6 +108,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>
