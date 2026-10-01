@@ -1,10 +1,11 @@
 """StudyBattle — AI Study Battle Game (FastAPI + vanilla JS)."""
+import hashlib
 import json
 import os
 import re
 import time
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
@@ -127,6 +128,72 @@ def groq_error_to_status_and_msg(exc: Exception) -> tuple[int, str]:
         return 404, "Model/endpoint not found (404)."
     return 503, f"Groq request failed: {msg[:200]}"
 
+# ---- Question validation + session-level dedupe (pure, unit-testable) ----
+# Retry budget: 1 initial Groq attempt + up to 2 retries per question item.
+MAX_JUDGE_RETRIES = 2
+
+# Session-level set of normalized-question hashes for the current run.
+# Cleared on every /api/start; also mirrored into GAME["seen_hashes"].
+_SEEN_HASHES: set = set()
+
+
+def normalize_qtext(text: str) -> str:
+    """Normalize question text for dedupe: lowercase + collapse whitespace."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def question_hash(text: str) -> str:
+    """Stable hash of normalized question text (session-level dedupe key)."""
+    return hashlib.sha256(normalize_qtext(text).encode("utf-8")).hexdigest()
+
+
+def validate_question(q: Dict[str, Any]) -> Tuple[bool, str]:
+    """Judge pass for one generated question (pure Python, no network).
+
+    Verifies:
+      - exactly one correct answer (answer matches exactly one option),
+      - no duplicate options (case-insensitive, whitespace-trimmed),
+      - correct index in range (answer is one of the options).
+
+    Returns (ok, reason); reason is "ok" when valid.
+    """
+    if not isinstance(q, dict):
+        return False, "question must be an object"
+    text = str(q.get("question", "")).strip()
+    answer = str(q.get("answer", "")).strip()
+    options = q.get("options")
+    qtype = q.get("type", "multiple_choice")
+    if not text:
+        return False, "missing question text"
+    if not answer:
+        return False, "missing answer"
+    if qtype == "true_false":
+        if not isinstance(options, list) or [str(o).strip() for o in options] != ["True", "False"]:
+            return False, "true_false options must be exactly [True, False]"
+        if answer not in ("True", "False"):
+            return False, "true_false answer must be True or False"
+        return True, "ok"
+    if not isinstance(options, list) or len(options) < 2:
+        return False, "needs >= 2 options"
+    cleaned = [str(o).strip() for o in options]
+    if any(not o for o in cleaned):
+        return False, "empty option text"
+    lowered = [o.casefold() for o in cleaned]
+    if len(set(lowered)) != len(lowered):
+        return False, "duplicate options"
+    matches = [o for o in cleaned if o == answer]
+    if len(matches) != 1:
+        # case-insensitive matches still ambiguous / not exact
+        ci = [o for o in cleaned if o.casefold() == answer.casefold()]
+        if len(ci) != 1:
+            return False, "answer must match exactly one option"
+        return False, "answer must exactly match one option (case-sensitive)"
+    idx = cleaned.index(answer)
+    if not (0 <= idx < len(cleaned)):
+        return False, "correct index out of range"
+    return True, "ok"
+
+
 # ---- Scoring math (pure, unit-testable) ----
 DIFF_MULT = {"Easy": 1.0, "Medium": 1.2, "Hard": 1.5}
 BASE_XP = {"multiple_choice": 100, "true_false": 80, "boss": 100}
@@ -195,6 +262,8 @@ def fresh_state(topic: str, difficulty: str) -> Dict[str, Any]:
         "current": None,  # current question dict
         "finished": False,
         "opened_at": time.time(),
+        "seen_hashes": [],
+        "dropped_total": 0,
     }
 
 GAME: Dict[str, Any] = fresh_state(topic="", difficulty="Medium")
@@ -367,6 +436,7 @@ def api_start(body: StartIn):
     global GAME
     GAME = fresh_state(body.topic, body.difficulty)
     GAME.pop("idle", None)
+    _SEEN_HASHES.clear()
     # Opening flavor: best-effort (fallback if no key/Groq down)
     flavor = f"Get ready to battle: {body.topic} ({body.difficulty})!"
     key = get_effective_key()
@@ -404,29 +474,177 @@ def api_question():
     qdata: Optional[Dict[str, Any]] = None
     source = "fallback"
     err_note = None
+    dropped = 0
+    validated = False
     key = get_effective_key()
     if key:
-        try:
-            qdata = generate_question_live(topic, diff, rnd, qtype if qtype != "boss" else "multiple_choice", is_boss, key)
+        # Judge pass with retry budget: 1 initial attempt + up to 2 retries.
+        # Invalid (bad shape / dup options / bad index) or repeated questions
+        # are dropped and regenerated so per-round counts stay correct.
+        for _attempt in range(1 + MAX_JUDGE_RETRIES):
+            try:
+                cand = generate_question_live(topic, diff, rnd, qtype if qtype != "boss" else "multiple_choice", is_boss, key)
+            except ValueError as ve:
+                dropped += 1
+                err_note = f"Model output parse issue, retrying: {str(ve)[:150]}"
+                continue
+            except Exception as exc:
+                code, msg = groq_error_to_status_and_msg(exc)
+                # Groq hard-fail: stop retrying, fall through to fallback refill.
+                err_note = msg
+                qdata = None
+                break
+            ok, reason = validate_question(cand)
+            if not ok:
+                dropped += 1
+                err_note = f"Question failed validation ({reason}), retrying."
+                continue
+            h = question_hash(cand["question"])
+            if h in _SEEN_HASHES:
+                dropped += 1
+                err_note = "Duplicate question detected, regenerating."
+                continue
+            qdata = cand
             source = "groq"
-        except ValueError as ve:
-            err_note = f"Model output parse issue, used fallback: {str(ve)[:150]}"
-            qdata = None
-        except Exception as exc:
-            code, msg = groq_error_to_status_and_msg(exc)
-            # If Groq hard-fails, fall back so gameplay continues, but surface note
-            err_note = msg
-            qdata = None
+            err_note = None
+            break
+        if qdata is None and dropped > MAX_JUDGE_RETRIES:
+            # Retry budget exhausted: drop the bad item, refill below with a
+            # known-good fallback so the round count stays correct.
+            err_note = (err_note + " Retry budget exhausted; used fallback refill.") if err_note else "Retry budget exhausted; used fallback refill."
     if qdata is None:
         qdata = build_fallback_question(topic, diff, rnd, qtype, is_boss)
+    # Final judge + dedupe guard on the served item (covers keyless/fallback
+    # path too). Fallback text embeds the round number so it stays unique;
+    # on the off chance it still collides, nudge it to keep counts correct.
+    ok, _reason = validate_question(qdata)
+    h = question_hash(qdata["question"])
+    if h in _SEEN_HASHES and source == "fallback":
+        qdata = dict(qdata)
+        qdata["question"] = f"{qdata['question']} [Round {rnd}]"
+        h = question_hash(qdata["question"])
+    validated = validate_question(qdata)[0]
+    _SEEN_HASHES.add(h)
+    GAME.setdefault("seen_hashes", []).append(h)
+    GAME["dropped_total"] = int(GAME.get("dropped_total", 0)) + dropped
     GAME["current"] = {**qdata, "round": rnd, "is_boss": is_boss,
                        "time_limit_ms": limit, "asked_at": time.time(), "source": source}
     out = {"ok": True, "round": rnd, "type": qdata["type"], "question": qdata["question"],
            "options": qdata["options"], "time_limit_ms": limit, "is_boss": is_boss,
-           "difficulty": diff, "xp_multiplier": (3 if is_boss else 1), "source": source}
+           "difficulty": diff, "xp_multiplier": (3 if is_boss else 1), "source": source,
+           "validated": validated, "dropped": dropped}
     if err_note:
         out["note"] = err_note
     return out
+
+
+class BatchIn(BaseModel):
+    topic: str
+    difficulty: str = "Medium"
+    count: int = 5
+
+    @field_validator("topic")
+    @classmethod
+    def _topic(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Topic must be non-empty.")
+        v = v.strip()
+        if len(v) > 200:
+            raise ValueError("Topic must be ≤ 200 characters.")
+        return v
+
+    @field_validator("difficulty")
+    @classmethod
+    def _diff(cls, v):
+        if v not in ("Easy", "Medium", "Hard"):
+            raise ValueError("Difficulty must be Easy, Medium, or Hard.")
+        return v
+
+    @field_validator("count")
+    @classmethod
+    def _count(cls, v):
+        try:
+            iv = int(v)
+        except Exception:
+            raise ValueError("count must be an integer.")
+        if not (1 <= iv <= 20):
+            raise ValueError("count must be between 1 and 20.")
+        return iv
+
+
+@app.post("/api/questions/batch")
+def api_questions_batch(body: BatchIn):
+    """Generate a validated question SET (additive; gameplay flow untouched).
+
+    Each item goes through the same judge pass as /api/question
+    (exactly one correct answer, no duplicate options, correct index in
+    range) plus session-level dedupe. Bad items are retried up to 2x, then
+    dropped and refilled with a fallback so ``len(questions) == count``.
+    Response always includes ``validated: true`` (all served items passed)
+    and ``dropped: N`` (invalid/dupe items discarded along the way).
+    """
+    questions: List[Dict[str, Any]] = []
+    dropped = 0
+    key = get_effective_key()
+    seen_local: set = set()
+    for i in range(1, body.count + 1):
+        item: Optional[Dict[str, Any]] = None
+        is_boss = (i % 5 == 0)
+        qtype = "boss" if is_boss else ("true_false" if (i % 2 == 0) else "multiple_choice")
+        for _attempt in range(1 + MAX_JUDGE_RETRIES):
+            if key:
+                try:
+                    cand = generate_question_live(
+                        body.topic, body.difficulty, i,
+                        qtype if qtype != "boss" else "multiple_choice", is_boss, key)
+                except Exception:
+                    dropped += 1
+                    continue
+            else:
+                # Keyless path: pure-python fallback generation (existing pattern).
+                cand = build_fallback_question(body.topic, body.difficulty, i, qtype, is_boss)
+                # Fallback is deterministic; validate once, no Groq retries needed.
+                ok, _r = validate_question(cand)
+                h = question_hash(cand["question"])
+                if not ok or h in _SEEN_HASHES or h in seen_local:
+                    dropped += 1
+                    cand = dict(cand)
+                    cand["question"] = f"{cand['question']} [set {i}]"
+                    h = question_hash(cand["question"])
+                item = cand
+                break
+            ok, _r = validate_question(cand)
+            h = question_hash(cand["question"])
+            if not ok or h in _SEEN_HASHES or h in seen_local:
+                dropped += 1
+                continue
+            item = cand
+            break
+        if item is None:
+            # Retry budget exhausted: drop the bad item + refill with a
+            # unique fallback so the requested count stays correct.
+            dropped += 1
+            item = build_fallback_question(body.topic, body.difficulty, 10_000 + i, qtype, is_boss)
+            item = dict(item)
+            item["question"] = f"{item['question']} [refill {i}]"
+        h = question_hash(item["question"])
+        seen_local.add(h)
+        _SEEN_HASHES.add(h)
+        GAME.setdefault("seen_hashes", []).append(h)
+        questions.append({
+            "type": item["type"],
+            "question": item["question"],
+            "options": item["options"],
+            "answer": item["answer"],
+            "explanation": item.get("explanation", ""),
+            "subtopic": item.get("subtopic", "general"),
+            "is_boss": is_boss,
+        })
+    all_ok = all(validate_question({**q})[0] for q in questions)
+    GAME["dropped_total"] = int(GAME.get("dropped_total", 0)) + dropped
+    return {"ok": True, "topic": body.topic, "difficulty": body.difficulty,
+            "requested": body.count, "count": len(questions),
+            "questions": questions, "validated": all_ok, "dropped": dropped}
 
 class AnswerIn(BaseModel):
     choice: str
