@@ -54,7 +54,18 @@ Settings ⚙ KEY modal → POSTs key to backend, verified live via `models.list`
 pip install -r requirements-test.txt
 pytest -q
 ```
-9 tests: combo/speed/XP/level/adaptation math, `/api/start` validation, 5-round fallback state machine (boss on round 5), weak-topics, `/api/status` shape.
+16 tests: scoring combo/speed/XP/level/adaptation math, `/api/start` validation, 5-round fallback state machine (boss on round 5), weak-topics, `/api/status` shape, question judge pass (exact answer, no dup options, index in range), session dedupe + retry-budget refill, `/api/questions/batch` set validation.
+
+## Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| `Enter a subject/topic to battle!` | Type a topic (≤ 200 chars) and press START BATTLE. |
+| `That key was rejected` / 401 | Re-copy the key from https://console.groq.com/keys (no extra spaces), save again in Settings. |
+| `Rate limit hit (429)` | Groq free tier throttled — wait ~30s and retry / start a new game. |
+| `Could not reach Groq (503)` | Check internet; if Groq is down, questions fall back to the offline bank. |
+| Timer hits zero instantly | You ran out of time — it auto-submits as wrong; answer faster next round. |
+| `No active question` | Press START BATTLE (or Replay) first, then answer. |
 
 ## Screenshots
 ![Desktop 1440px](screenshots/qa-1440.png)
